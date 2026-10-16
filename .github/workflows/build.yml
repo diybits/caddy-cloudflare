@@ -1,0 +1,50 @@
+name: Build and publish
+
+on:
+  push:
+    branches: [main]
+    paths: [Dockerfile, .github/workflows/build.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency: build
+
+env:
+  IMAGE: ghcr.io/diybits/caddy-cloudflare
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # Tags are YYYY.DDD.N (UTC day of year, Nth build that day).
+      - name: Pick the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prefix=$(date -u +%Y.%j)
+          last=$(gh api --paginate /orgs/diybits/packages/container/caddy-cloudflare/versions \
+                   -q '.[].metadata.container.tags[]' 2>/dev/null \
+                 | sed -n "s/^${prefix//./\\.}\.\([0-9]*\)$/\1/p" | sort -n | tail -1)
+          echo "tag=${prefix}.$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build --pull \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            -t "$IMAGE:${{ steps.tag.outputs.tag }}" .
+
+      - name: Check the Cloudflare module is in the binary
+        run: docker run --rm "$IMAGE:${{ steps.tag.outputs.tag }}" caddy list-modules | grep -x 'dns.providers.cloudflare'
+
+      - name: Push
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ steps.tag.outputs.tag }}"
+          echo "Pushed $IMAGE:${{ steps.tag.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
